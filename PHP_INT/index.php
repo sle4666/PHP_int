@@ -2,17 +2,15 @@
 session_start();
 require_once 'db.php';
 
-// Проверка авторизации
 if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
     header('Location: login.php');
     exit;
 }
 
-// Настройки
 $lang = $_COOKIE['lang'] ?? 'ru';
 $theme = $_COOKIE['theme'] ?? 'light';
+$page = $_GET['page'] ?? 'dashboard';
 
-// Сохранение настроек
 if (isset($_POST['save_settings'])) {
     $lang = $_POST['lang'] ?? 'ru';
     $theme = $_POST['theme'] ?? 'light';
@@ -22,395 +20,274 @@ if (isset($_POST['save_settings'])) {
     exit;
 }
 
-// Словарь
-$tr = [
-    'ru' => [
-        'home' => 'Главная', 'catalog' => 'Каталог', 'tables' => 'База данных',
-        'settings' => 'Настройки', 'logout' => 'Выход', 'search' => 'Поиск запчастей...',
-        'popular' => 'Популярные товары', 'all_products' => 'Все товары',
-        'price' => 'Цена', 'buy' => 'Купить', 'in_stock' => 'В наличии',
-        'out_of_stock' => 'Нет в наличии', 'article' => 'Артикул',
-        'categories' => 'Категории', 'brands' => 'Бренды',
-        'language' => 'Язык', 'theme' => 'Тема', 'save' => 'Сохранить',
-        'cancel' => 'Отмена', 'translate' => 'Переводчик',
-        'translate_text' => 'Введите текст', 'translate_btn' => 'Перевести',
-        'result' => 'Результат', 'russian' => 'Русский', 'english' => 'English',
-        'light' => 'Светлая', 'dark' => 'Тёмная',
-    ],
-    'en' => [
-        'home' => 'Home', 'catalog' => 'Catalog', 'tables' => 'Database',
-        'settings' => 'Settings', 'logout' => 'Logout', 'search' => 'Search parts...',
-        'popular' => 'Popular Products', 'all_products' => 'All Products',
-        'price' => 'Price', 'buy' => 'Buy', 'in_stock' => 'In Stock',
-        'out_of_stock' => 'Out of Stock', 'article' => 'Article',
-        'categories' => 'Categories', 'brands' => 'Brands',
-        'language' => 'Language', 'theme' => 'Theme', 'save' => 'Save',
-        'cancel' => 'Cancel', 'translate' => 'Translator',
-        'translate_text' => 'Enter text', 'translate_btn' => 'Translate',
-        'result' => 'Result', 'russian' => 'Russian', 'english' => 'English',
-        'light' => 'Light', 'dark' => 'Dark',
-    ]
-];
+// Добавление в корзину
+if (isset($_GET['add_to_cart']) && $db_connected) {
+    $id = (int)$_GET['add_to_cart'];
+    $type = $_GET['type'] ?? 'material';
+    
+    if ($type == 'material' && in_array('shop_products', $tables)) {
+        $stmt = $pdo->prepare("SELECT цена_розница FROM shop_products WHERE id = ?");
+        $stmt->execute([$id]);
+        $price = $stmt->fetchColumn();
+        if ($price) {
+            $pdo->prepare("INSERT INTO cart (user_id, тип_товара, product_id, количество, цена_на_момент) VALUES (1, 'материал', ?, 1, ?)")->execute([$id, $price]);
+        }
+    } elseif ($type == 'service' && in_array('services', $tables)) {
+        $stmt = $pdo->prepare("SELECT базовая_цена FROM services WHERE id = ?");
+        $stmt->execute([$id]);
+        $price = $stmt->fetchColumn();
+        if ($price) {
+            $pdo->prepare("INSERT INTO cart (user_id, тип_товара, service_id, количество, цена_на_момент) VALUES (1, 'услуга', ?, 1, ?)")->execute([$id, $price]);
+        }
+    }
+    header('Location: ' . ($_SERVER['HTTP_REFERER'] ?? 'index.php'));
+    exit;
+}
 
-function t($key) { global $tr, $lang; return $tr[$lang][$key] ?? $key; }
+// Удаление из корзины
+if (isset($_GET['remove_from_cart']) && $db_connected) {
+    $pdo->prepare("DELETE FROM cart WHERE id = ?")->execute([(int)$_GET['remove_from_cart']]);
+    header('Location: ?page=cart');
+    exit;
+}
 
 // Получаем данные
-$page = $_GET['page'] ?? 'home';
-$categories = [];
+$stats = [];
+$orders = [];
+$services = [];
 $products = [];
-$brands = [];
+$cart_items = [];
+$cart_total = 0;
+$categories = [];
+$all_tables_data = [];
 
 if ($db_connected) {
     try {
-        if (in_array('categories', $tables)) {
-            $categories = $pdo->query("SELECT * FROM categories LIMIT 20")->fetchAll();
+        $stats['orders'] = $pdo->query("SELECT COUNT(*) FROM orders")->fetchColumn();
+        $stats['active'] = $pdo->query("SELECT COUNT(*) FROM orders WHERE статус IN ('в_работе','согласование')")->fetchColumn();
+        $stats['done'] = $pdo->query("SELECT COUNT(*) FROM orders WHERE статус = 'завершен'")->fetchColumn();
+        $stats['revenue'] = $pdo->query("SELECT COALESCE(SUM(итоговая_стоимость),0) FROM orders WHERE статус!='отменен'")->fetchColumn();
+        
+        if (in_array('orders', $tables)) {
+            $orders = $pdo->query("SELECT o.*, c.фамилия, c.имя, obj.адрес as адрес_объекта FROM orders o JOIN clients c ON o.client_id=c.id JOIN objects obj ON o.object_id=obj.id ORDER BY o.created_at DESC LIMIT 20")->fetchAll();
         }
-        if (in_array('products', $tables)) {
-            $products = $pdo->query("SELECT * FROM products WHERE активно = 1 LIMIT 12")->fetchAll();
+        if (in_array('service_categories', $tables)) {
+            $categories = $pdo->query("SELECT sc.*, (SELECT COUNT(*) FROM services WHERE category_id=sc.id) as cnt FROM service_categories sc ORDER BY sc.сортировка")->fetchAll();
         }
-        if (in_array('brands', $tables)) {
-            $brands = $pdo->query("SELECT * FROM brands LIMIT 10")->fetchAll();
+        if (in_array('services', $tables)) {
+            $cat = $_GET['cat'] ?? '';
+            $sql = "SELECT s.*, sc.название as кат_название FROM services s JOIN service_categories sc ON s.category_id=sc.id WHERE s.активно=1";
+            if ($cat) $sql .= " AND s.category_id=".(int)$cat;
+            $sql .= " ORDER BY s.популярность DESC";
+            $services = $pdo->query($sql)->fetchAll();
+        }
+        if (in_array('shop_products', $tables)) {
+            $products = $pdo->query("SELECT sp.*, sc.название as кат_название FROM shop_products sp JOIN service_categories sc ON sp.category_id=sc.id WHERE sp.активно=1 ORDER BY sp.популярность DESC")->fetchAll();
+        }
+        if (in_array('cart', $tables)) {
+            $cart_items = $pdo->query("SELECT c.*, COALESCE(sp.название, srv.название) as товар, COALESCE(sp.артикул, 'услуга') as артикул FROM cart c LEFT JOIN shop_products sp ON c.product_id=sp.id LEFT JOIN services srv ON c.service_id=srv.id ORDER BY c.created_at DESC")->fetchAll();
+            foreach ($cart_items as $item) $cart_total += $item['цена_на_момент'] * $item['количество'];
         }
     } catch (Exception $e) {}
 }
 
-// Товары по категории
-$selected_category = $_GET['category'] ?? '';
-$category_products = [];
-if ($selected_category && $db_connected) {
-    try {
-        $stmt = $pdo->prepare("SELECT * FROM products WHERE category_id = ? LIMIT 50");
-        $stmt->execute([$selected_category]);
-        $category_products = $stmt->fetchAll();
-    } catch (Exception $e) {}
-}
-
-// Данные таблиц
-$selected_table = $_GET['table'] ?? '';
-$table_data = ['columns' => [], 'rows' => [], 'count' => 0];
-if ($selected_table && $db_connected && $page == 'tables') {
-    $table_data = getTableData($pdo, $selected_table);
-}
-$table_stats = $db_connected ? getTableStats($pdo, $tables) : [];
-
-// Перевод через Google
-if (isset($_POST['ajax_translate'])) {
-    header('Content-Type: application/json');
-    $text = $_POST['text'] ?? '';
-    $from = $_POST['from'] ?? 'en';
-    $to = $_POST['to'] ?? 'ru';
-    
-    $url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl={$from}&tl={$to}&dt=t&q=" . urlencode($text);
-    $response = @file_get_contents($url);
-    
-    if ($response) {
-        $json = json_decode($response, true);
-        $translated = '';
-        if (isset($json[0])) {
-            foreach ($json[0] as $seg) $translated .= $seg[0];
-        }
-        echo json_encode(['translated' => $translated]);
-    } else {
-        echo json_encode(['translated' => '']);
-    }
-    exit;
+function statusBadge($s) {
+    $b = ['новый'=>['#bee3f8','#2b6cb0','Новый'],'в_работе'=>['#c6f6d5','#276749','В работе'],'завершен'=>['#c6f6d5','#22543d','Завершен'],'отменен'=>['#fed7d7','#9b2c2c','Отменен']];
+    $x = $b[$s] ?? ['#e2e8f0','#4a5568',$s];
+    return "<span style='background:{$x[0]};color:{$x[1]};padding:3px 8px;border-radius:10px;font-size:11px;font-weight:600;'>{$x[2]}</span>";
 }
 ?>
 <!DOCTYPE html>
-<html lang="<?php echo $lang; ?>" data-theme="<?php echo $theme; ?>">
+<html lang="ru" data-theme="<?php echo $theme; ?>">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>avtoZ - <?php echo t($page == 'home' ? 'home' : $page); ?></title>
+    <title>Ремонт-Хаб</title>
     <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-    <!-- Шапка -->
     <header class="header">
-        <div class="header-top">
-            <div class="container header-inner">
+        <div class="header-main">
+            <div class="container header-main-inner">
                 <a href="index.php" class="logo">
-                    <span class="logo-icon">🚗</span>
-                    <span class="logo-text">avto<span class="logo-accent">Z</span></span>
+                    <span class="logo-icon">🏗️</span>
+                    <div><div class="logo-text">Ремонт<span class="logo-accent">Хаб</span></div><div class="logo-slogan">ремонт квартир под ключ</div></div>
                 </a>
                 
-                <div class="search-box">
-                    <input type="text" placeholder="<?php echo t('search'); ?>" class="search-input">
-                    <button class="search-btn">🔍</button>
+                <!-- Кнопка КАТАЛОГ -->
+                <div class="dropdown">
+                    <button class="catalog-btn">📂 Каталог ▼</button>
+                    <div class="dropdown-menu">
+                        <?php foreach ($categories as $cat): ?>
+                            <div class="dropdown-group">
+                                <a href="?page=services&cat=<?php echo $cat['id']; ?>" class="dropdown-title">
+                                    <?php echo $cat['иконка']; ?> <?php echo $cat['название']; ?>
+                                    <span class="dropdown-count"><?php echo $cat['cnt']; ?></span>
+                                </a>
+                            </div>
+                        <?php endforeach; ?>
+                        <div class="dropdown-divider"></div>
+                        <a href="?page=shop" class="dropdown-title">🛒 Магазин материалов</a>
+                    </div>
                 </div>
                 
-                <div class="header-actions">
-                    <button class="icon-btn" onclick="openModal('translatorModal')" title="<?php echo t('translate'); ?>">
-                        🌐
-                    </button>
-                    <button class="icon-btn" onclick="openModal('settingsModal')" title="<?php echo t('settings'); ?>">
-                        ⚙️
-                    </button>
-                    <a href="logout.php" class="btn-logout"><?php echo t('logout'); ?></a>
+                <div class="search-box">
+                    <input type="text" placeholder="Поиск услуги или товара...">
+                    <button>🔍</button>
+                </div>
+                
+                <div class="header-icons">
+                    <a href="?page=cart" class="cart-icon-link">
+                        🛒
+                        <?php if (count($cart_items) > 0): ?>
+                            <span class="cart-badge"><?php echo count($cart_items); ?></span>
+                        <?php endif; ?>
+                    </a>
+                    <button class="icon-btn" onclick="openModal('settingsModal')">⚙️</button>
+                    <a href="logout.php" class="icon-btn">🚪</a>
                 </div>
             </div>
         </div>
-        
         <nav class="header-nav">
             <div class="container">
-                <a href="index.php" class="nav-link <?php echo $page == 'home' ? 'active' : ''; ?>">
-                    🏠 <?php echo t('home'); ?>
-                </a>
-                <a href="?page=catalog" class="nav-link <?php echo $page == 'catalog' ? 'active' : ''; ?>">
-                    📂 <?php echo t('catalog'); ?>
-                </a>
-                <a href="?page=tables" class="nav-link <?php echo $page == 'tables' ? 'active' : ''; ?>">
-                    🗄️ <?php echo t('tables'); ?>
-                </a>
+                <a href="index.php" class="<?php echo $page=='dashboard'?'active':''; ?>">📊 Дашборд</a>
+                <a href="?page=orders" class="<?php echo $page=='orders'?'active':''; ?>">📋 Заказы</a>
+                <a href="?page=clients" class="<?php echo $page=='clients'?'active':''; ?>">👥 Клиенты</a>
+                <a href="?page=staff" class="<?php echo $page=='staff'?'active':''; ?>">👷 Персонал</a>
+                <a href="?page=logistics" class="<?php echo $page=='logistics'?'active':''; ?>">🚚 Логистика</a>
             </div>
         </nav>
     </header>
     
-    <!-- Основной контент -->
-    <main class="container main-content">
-        <?php if ($page == 'catalog' && $selected_category): ?>
-            <!-- Товары категории -->
-            <div class="section">
-                <h2 class="section-title">📁 Товары в категории</h2>
-                <div class="products-grid">
-                    <?php foreach ($category_products as $p): ?>
-                        <div class="product-card">
-                            <div class="product-image">
-                                <img src="https://via.placeholder.com/300x300/e2e8f0/4a5568?text=<?php echo urlencode($p['название'] ?? $p['name'] ?? 'Part'); ?>" 
-                                     alt="<?php echo htmlspecialchars($p['название'] ?? $p['name'] ?? ''); ?>">
-                                <?php if (($p['количество_на_складе'] ?? $p['quantity'] ?? 0) > 0): ?>
-                                    <span class="stock-badge in-stock">✅ <?php echo t('in_stock'); ?></span>
-                                <?php else: ?>
-                                    <span class="stock-badge out-of-stock">❌ <?php echo t('out_of_stock'); ?></span>
-                                <?php endif; ?>
-                            </div>
-                            <div class="product-info">
-                                <h3><?php echo htmlspecialchars(mb_substr($p['название'] ?? $p['name'] ?? '', 0, 50)); ?></h3>
-                                <p class="product-article"><?php echo t('article'); ?>: <?php echo htmlspecialchars($p['артикул'] ?? $p['article'] ?? '-'); ?></p>
-                                <div class="product-price"><?php echo number_format($p['цена'] ?? $p['price'] ?? 0, 0, ',', ' '); ?> ₽</div>
-                                <button class="btn btn-primary">🛒 <?php echo t('buy'); ?></button>
-                            </div>
+    <main class="main-content">
+        <div class="container">
+        <?php if ($page == 'services'): ?>
+            <h2 class="section-title">🔧 Услуги <?php echo isset($_GET['cat']) ? '- ' . ($categories[array_search($_GET['cat'], array_column($categories, 'id'))]['название'] ?? '') : ''; ?></h2>
+            
+            <!-- Фильтр -->
+            <div class="filter-bar">
+                <a href="?page=services" class="filter-btn <?php echo empty($_GET['cat'])?'active':''; ?>">Все услуги</a>
+                <?php foreach ($categories as $c): ?>
+                    <a href="?page=services&cat=<?php echo $c['id']; ?>" class="filter-btn <?php echo ($_GET['cat']??'')==$c['id']?'active':''; ?>"><?php echo $c['иконка']; ?> <?php echo $c['название']; ?></a>
+                <?php endforeach; ?>
+            </div>
+            
+            <div class="products-grid">
+                <?php foreach ($services as $s): ?>
+                    <div class="product-card">
+                        <div class="product-card-header">
+                            <span class="category-badge"><?php echo $s['кат_название']; ?></span>
+                            <span>⭐ <?php echo $s['популярность']; ?></span>
                         </div>
-                    <?php endforeach; ?>
-                </div>
-            </div>
-            
-        <?php elseif ($page == 'catalog'): ?>
-            <!-- Каталог категорий -->
-            <div class="section">
-                <h2 class="section-title">📂 <?php echo t('categories'); ?></h2>
-                <div class="categories-grid">
-                    <?php foreach ($categories as $cat): ?>
-                        <a href="?page=catalog&category=<?php echo $cat['id']; ?>" class="category-card">
-                            <div class="category-img">
-                                <img src="https://via.placeholder.com/400x300/e2e8f0/4a5568?text=<?php echo urlencode($cat['name'] ?? $cat['название'] ?? ''); ?>" 
-                                     alt="<?php echo htmlspecialchars($cat['name'] ?? $cat['название'] ?? ''); ?>">
-                            </div>
-                            <div class="category-info">
-                                <h3><?php echo htmlspecialchars($cat['name'] ?? $cat['название'] ?? ''); ?></h3>
-                            </div>
-                        </a>
-                    <?php endforeach; ?>
-                </div>
-            </div>
-            
-        <?php elseif ($page == 'tables'): ?>
-            <!-- Таблицы БД -->
-            <div class="section">
-                <h2 class="section-title">🗄️ <?php echo t('tables'); ?></h2>
-                <div class="tabs-nav">
-                    <?php foreach ($tables as $table): ?>
-                        <a href="?page=tables&table=<?php echo urlencode($table); ?>" 
-                           class="tab-link <?php echo $table === $selected_table ? 'active' : ''; ?>">
-                            <?php echo htmlspecialchars($table); ?>
-                        </a>
-                    <?php endforeach; ?>
-                </div>
-                
-                <?php if ($selected_table): ?>
-                    <div class="table-wrapper">
-                        <table class="data-table">
-                            <thead>
-                                <tr>
-                                    <th>#</th>
-                                    <?php foreach ($table_data['columns'] as $col): ?>
-                                        <th><?php echo htmlspecialchars($col); ?></th>
-                                    <?php endforeach; ?>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php foreach ($table_data['rows'] as $i => $row): ?>
-                                <tr>
-                                    <td><?php echo $i + 1; ?></td>
-                                    <?php foreach ($row as $val): ?>
-                                        <td><?php echo htmlspecialchars(mb_substr($val ?? '', 0, 100)); ?></td>
-                                    <?php endforeach; ?>
-                                </tr>
-                                <?php endforeach; ?>
-                            </tbody>
-                        </table>
+                        <h3><?php echo $s['название']; ?></h3>
+                        <p class="text-muted"><?php echo mb_substr($s['описание']??'', 0, 100); ?>...</p>
+                        <div class="product-meta">
+                            <span>📏 <?php echo $s['единица_измерения']; ?></span>
+                            <span>⏱️ <?php echo $s['срок_выполнения']; ?></span>
+                        </div>
+                        <div class="product-price">от <?php echo number_format($s['базовая_цена'], 0, ',', ' '); ?> ₽</div>
+                        <a href="?add_to_cart=<?php echo $s['id']; ?>&type=service" class="btn-add-cart">🛒 В корзину</a>
                     </div>
-                <?php endif; ?>
+                <?php endforeach; ?>
             </div>
+            
+        <?php elseif ($page == 'shop'): ?>
+            <h2 class="section-title">🛒 Магазин материалов</h2>
+            
+            <div class="products-grid">
+                <?php foreach ($products as $p): ?>
+                    <div class="product-card">
+                        <div class="product-card-header">
+                            <span class="category-badge">📦 <?php echo $p['кат_название']; ?></span>
+                            <?php if ($p['количество_на_складе'] > 0): ?>
+                                <span style="color:#48bb78;font-size:12px;">✅ В наличии</span>
+                            <?php else: ?>
+                                <span style="color:#e53e3e;font-size:12px;">❌ Нет</span>
+                            <?php endif; ?>
+                        </div>
+                        <h3><?php echo $p['название']; ?></h3>
+                        <p class="text-muted">Арт: <?php echo $p['артикул']; ?></p>
+                        <p class="text-muted"><?php echo mb_substr($p['описание'],0,80); ?>...</p>
+                        <div class="product-price"><?php echo number_format($p['цена_розница'], 0, ',', ' '); ?> ₽</div>
+                        <?php if ($p['количество_на_складе'] > 0): ?>
+                            <a href="?add_to_cart=<?php echo $p['id']; ?>&type=material" class="btn-add-cart">🛒 В корзину</a>
+                        <?php endif; ?>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+            
+        <?php elseif ($page == 'cart'): ?>
+            <h2 class="section-title">🛒 Корзина</h2>
+            <?php if (!empty($cart_items)): ?>
+                <div class="card">
+                    <table class="data-table">
+                        <thead><tr><th>Товар/Услуга</th><th>Цена</th><th>Кол-во</th><th>Сумма</th><th></th></tr></thead>
+                        <tbody>
+                            <?php foreach ($cart_items as $item): 
+                                $sum = $item['цена_на_момент'] * $item['количество'];
+                            ?>
+                                <tr>
+                                    <td><strong><?php echo $item['товар']; ?></strong><br><small><?php echo $item['артикул']; ?></small></td>
+                                    <td><?php echo number_format($item['цена_на_момент'], 0, ',', ' '); ?> ₽</td>
+                                    <td><?php echo $item['количество']; ?></td>
+                                    <td><strong><?php echo number_format($sum, 0, ',', ' '); ?> ₽</strong></td>
+                                    <td><a href="?remove_from_cart=<?php echo $item['id']; ?>" style="color:#e53e3e;text-decoration:none;">❌</a></td>
+                                </tr>
+                            <?php endforeach; ?>
+                            <tr style="font-size:18px;font-weight:700;background:#f7fafc;">
+                                <td colspan="3" style="text-align:right;padding:15px;">Итого:</td>
+                                <td style="color:#f97316;padding:15px;"><?php echo number_format($cart_total, 0, ',', ' '); ?> ₽</td>
+                                <td></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div style="text-align:right;margin-top:20px;">
+                        <button class="btn-primary" style="width:auto;padding:15px 40px;">📋 Оформить заказ</button>
+                    </div>
+                </div>
+            <?php else: ?>
+                <div class="card" style="text-align:center;padding:60px;">
+                    <p style="font-size:64px;">🛒</p>
+                    <h3>Корзина пуста</h3>
+                    <p class="text-muted">Добавьте услуги из каталога или товары из магазина</p>
+                    <a href="?page=services" class="btn-primary" style="display:inline-block;width:auto;margin-top:20px;text-decoration:none;">🔧 Перейти к услугам</a>
+                </div>
+            <?php endif; ?>
+            
+        <?php elseif ($page == 'orders'): ?>
+            <h2 class="section-title">📋 Заказы</h2>
+            <div class="card"><table class="data-table"><thead><tr><th>Номер</th><th>Клиент</th><th>Адрес</th><th>Сумма</th><th>Статус</th></tr></thead><tbody>
+                <?php foreach($orders as $o): ?>
+                    <tr><td><strong><?php echo $o['номер_заказа']; ?></strong></td><td><?php echo $o['фамилия'].' '.$o['имя']; ?></td><td><?php echo mb_substr($o['адрес_объекта'],0,30); ?>...</td><td><?php echo number_format($o['итоговая_стоимость'],0,',',' '); ?> ₽</td><td><?php echo statusBadge($o['статус']); ?></td></tr>
+                <?php endforeach; ?>
+            </tbody></table></div>
             
         <?php else: ?>
-            <!-- Главная -->
-            <?php if (!empty($products)): ?>
-                <div class="section">
-                    <h2 class="section-title">⭐ <?php echo t('popular'); ?></h2>
-                    <div class="products-grid">
-                        <?php foreach ($products as $p): ?>
-                            <div class="product-card">
-                                <div class="product-image">
-                                    <img src="https://via.placeholder.com/300x300/e2e8f0/4a5568?text=<?php echo urlencode(mb_substr($p['название'] ?? $p['name'] ?? 'Part', 0, 20)); ?>" 
-                                         alt="<?php echo htmlspecialchars($p['название'] ?? $p['name'] ?? ''); ?>">
-                                    <?php if (($p['количество_на_складе'] ?? $p['quantity'] ?? 0) > 0): ?>
-                                        <span class="stock-badge in-stock">✅ <?php echo t('in_stock'); ?></span>
-                                    <?php else: ?>
-                                        <span class="stock-badge out-of-stock">❌ <?php echo t('out_of_stock'); ?></span>
-                                    <?php endif; ?>
-                                </div>
-                                <div class="product-info">
-                                    <h3><?php echo htmlspecialchars(mb_substr($p['название'] ?? $p['name'] ?? '', 0, 50)); ?></h3>
-                                    <p class="product-article"><?php echo t('article'); ?>: <?php echo htmlspecialchars($p['артикул'] ?? $p['article'] ?? '-'); ?></p>
-                                    <div class="product-price"><?php echo number_format($p['цена'] ?? $p['price'] ?? 0, 0, ',', ' '); ?> ₽</div>
-                                    <button class="btn btn-primary">🛒 <?php echo t('buy'); ?></button>
-                                </div>
-                            </div>
-                        <?php endforeach; ?>
-                    </div>
-                </div>
-            <?php endif; ?>
-            
+            <h2 class="section-title">📊 Дашборд</h2>
+            <div class="stats-grid">
+                <div class="stat-card" style="--accent:#4299e1;"><div class="stat-icon">📋</div><div class="stat-number"><?php echo $stats['orders']??0; ?></div><div class="stat-label">Заказов</div></div>
+                <div class="stat-card" style="--accent:#f97316;"><div class="stat-icon">🔨</div><div class="stat-number"><?php echo $stats['active']??0; ?></div><div class="stat-label">В работе</div></div>
+                <div class="stat-card" style="--accent:#48bb78;"><div class="stat-icon">✅</div><div class="stat-number"><?php echo $stats['done']??0; ?></div><div class="stat-label">Завершено</div></div>
+                <div class="stat-card" style="--accent:#ed8936;"><div class="stat-icon">💰</div><div class="stat-number"><?php echo number_format(($stats['revenue']??0)/1000,1); ?>K</div><div class="stat-label">Выручка</div></div>
+            </div>
             <?php if (!empty($categories)): ?>
-                <div class="section">
-                    <h2 class="section-title">📂 <?php echo t('categories'); ?></h2>
-                    <div class="categories-grid">
-                        <?php foreach (array_slice($categories, 0, 4) as $cat): ?>
-                            <a href="?page=catalog&category=<?php echo $cat['id']; ?>" class="category-card">
-                                <div class="category-img">
-                                    <img src="https://via.placeholder.com/400x300/e2e8f0/4a5568?text=<?php echo urlencode($cat['name'] ?? $cat['название'] ?? ''); ?>" 
-                                         alt="<?php echo htmlspecialchars($cat['name'] ?? $cat['название'] ?? ''); ?>">
-                                </div>
-                                <div class="category-info">
-                                    <h3><?php echo htmlspecialchars($cat['name'] ?? $cat['название'] ?? ''); ?></h3>
-                                </div>
-                            </a>
-                        <?php endforeach; ?>
-                    </div>
-                </div>
+                <div class="card"><h3>📂 Популярные категории</h3><div class="categories-grid">
+                    <?php foreach(array_slice($categories,0,6) as $c): ?>
+                        <a href="?page=services&cat=<?php echo $c['id']; ?>" class="category-card">
+                            <div class="category-icon-big"><?php echo $c['иконка']; ?></div>
+                            <h3><?php echo $c['название']; ?></h3>
+                        </a>
+                    <?php endforeach; ?>
+                </div></div>
             <?php endif; ?>
-            
         <?php endif; ?>
+        </div>
     </main>
     
-    <!-- Футер -->
-    <footer class="footer">
-        <div class="container">
-            <p>© 2025 avtoZ. Все права защищены.</p>
-        </div>
-    </footer>
-    
-    <!-- Модальное окно: Переводчик -->
-    <div id="translatorModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>🌐 <?php echo t('translate'); ?></h3>
-                <span class="close" onclick="closeModal('translatorModal')">&times;</span>
-            </div>
-            <div class="modal-body">
-                <div class="translate-row">
-                    <select id="translateFrom" class="form-select">
-                        <option value="en">English</option>
-                        <option value="ru">Русский</option>
-                        <option value="auto">Auto</option>
-                    </select>
-                    <span>→</span>
-                    <select id="translateTo" class="form-select">
-                        <option value="ru">Русский</option>
-                        <option value="en">English</option>
-                    </select>
-                </div>
-                <textarea id="translateInput" class="form-textarea" placeholder="<?php echo t('translate_text'); ?>..." rows="4"></textarea>
-                <button class="btn btn-primary" onclick="doTranslate()"><?php echo t('translate_btn'); ?></button>
-                <div id="translateResult" class="translate-result" style="display:none;">
-                    <h4><?php echo t('result'); ?>:</h4>
-                    <p id="translatedText"></p>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <!-- Модальное окно: Настройки -->
-    <div id="settingsModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>⚙️ <?php echo t('settings'); ?></h3>
-                <span class="close" onclick="closeModal('settingsModal')">&times;</span>
-            </div>
-            <div class="modal-body">
-                <form method="POST">
-                    <div class="setting-group">
-                        <label><?php echo t('language'); ?></label>
-                        <select name="lang" class="form-select">
-                            <option value="ru" <?php echo $lang == 'ru' ? 'selected' : ''; ?>>🇷🇺 <?php echo t('russian'); ?></option>
-                            <option value="en" <?php echo $lang == 'en' ? 'selected' : ''; ?>>🇬🇧 <?php echo t('english'); ?></option>
-                        </select>
-                    </div>
-                    <div class="setting-group">
-                        <label><?php echo t('theme'); ?></label>
-                        <div class="theme-options">
-                            <label class="theme-option <?php echo $theme == 'light' ? 'active' : ''; ?>">
-                                <input type="radio" name="theme" value="light" <?php echo $theme == 'light' ? 'checked' : ''; ?>>
-                                <span class="theme-preview light-preview"></span>
-                                ☀️ <?php echo t('light'); ?>
-                            </label>
-                            <label class="theme-option <?php echo $theme == 'dark' ? 'active' : ''; ?>">
-                                <input type="radio" name="theme" value="dark" <?php echo $theme == 'dark' ? 'checked' : ''; ?>>
-                                <span class="theme-preview dark-preview"></span>
-                                🌙 <?php echo t('dark'); ?>
-                            </label>
-                        </div>
-                    </div>
-                    <div class="settings-actions">
-                        <button type="submit" name="save_settings" class="btn btn-primary">💾 <?php echo t('save'); ?></button>
-                        <button type="button" class="btn btn-secondary" onclick="closeModal('settingsModal')"><?php echo t('cancel'); ?></button>
-                    </div>
-                </form>
-            </div>
-        </div>
-    </div>
-    
-    <script>
-        function openModal(id) { document.getElementById(id).style.display = 'block'; }
-        function closeModal(id) { document.getElementById(id).style.display = 'none'; }
-        window.onclick = function(e) { if (e.target.className === 'modal') e.target.style.display = 'none'; }
-        
-        async function doTranslate() {
-            const text = document.getElementById('translateInput').value;
-            const from = document.getElementById('translateFrom').value;
-            const to = document.getElementById('translateTo').value;
-            if (!text.trim()) return;
-            
-            const formData = new FormData();
-            formData.append('ajax_translate', '1');
-            formData.append('text', text);
-            formData.append('from', from);
-            formData.append('to', to);
-            
-            try {
-                const resp = await fetch('index.php', { method: 'POST', body: formData });
-                const data = await resp.json();
-                document.getElementById('translatedText').textContent = data.translated;
-                document.getElementById('translateResult').style.display = 'block';
-            } catch(e) {}
-        }
-    </script>
-        <!-- ФУТЕР -->
+    <!-- ФУТЕР -->
     <footer class="footer">
         <div class="container">
             <div class="footer-grid">
-                <!-- Колонка 1: Контакты -->
                 <div class="footer-col">
                     <h4>Контакты</h4>
                     <div class="footer-contact-item">
@@ -422,61 +299,54 @@ if (isset($_POST['ajax_translate'])) {
                         <span>предложения о сотрудничестве, реклама</span>
                     </div>
                 </div>
-                
-                <!-- Колонка 2: Адрес и рейтинг -->
                 <div class="footer-col">
                     <h4>Адрес</h4>
-                    <p class="footer-address">
-                        территория ГМ АЗС, с20/27,<br>
-                        посёлок городского типа Инской,<br>
-                        Кемеровская область — Кузбасс
-                    </p>
-                    
-                    <div class="footer-rating">
-                        <div class="rating-value">4,8</div>
-                        <div class="rating-text">Рейтинг организации в Яндексе</div>
-                    </div>
+                    <p class="footer-address">территория ГМ АЗС, с20/27,<br>посёлок городского типа Инской,<br>Кемеровская область — Кузбасс</p>
+                    <div class="footer-rating"><div class="rating-value">4,8</div><div class="rating-text">Рейтинг организации в Яндексе</div></div>
                 </div>
-                
-                <!-- Колонка 3: Информация -->
                 <div class="footer-col">
                     <h4>Информация</h4>
                     <ul class="footer-links">
-                        <li><a href="#">Политикой обработки персональных данных</a></li>
+                        <li><a href="#">Политика обработки персональных данных</a></li>
                         <li><a href="#">Оферта</a></li>
                         <li><a href="#">Согласие на обработку персональных данных</a></li>
                     </ul>
                 </div>
-                
-                <!-- Колонка 4: Каталог -->
                 <div class="footer-col">
-                    <h4>Каталог</h4>
+                    <h4>Услуги</h4>
                     <ul class="footer-links">
-                        <?php if (!empty($categories)): ?>
-                            <?php foreach (array_slice($categories, 0, 6) as $cat): ?>
-                                <li>
-                                    <a href="?category=<?php echo $cat['id']; ?>">
-                                        <?php echo htmlspecialchars($cat['name'] ?? $cat['название'] ?? 'Категория'); ?>
-                                    </a>
-                                </li>
-                            <?php endforeach; ?>
-                        <?php else: ?>
-                            <li><a href="?catalog=1">Двигатель</a></li>
-                            <li><a href="?catalog=1">Трансмиссия</a></li>
-                            <li><a href="?catalog=1">Тормозная система</a></li>
-                            <li><a href="?catalog=1">Подвеска</a></li>
-                            <li><a href="?catalog=1">Электрика</a></li>
-                            <li><a href="?catalog=1">Фильтры</a></li>
-                        <?php endif; ?>
+                        <?php foreach(array_slice($categories,0,8) as $cat): ?>
+                            <li><a href="?page=services&cat=<?php echo $cat['id']; ?>"><?php echo $cat['иконка']; ?> <?php echo $cat['название']; ?></a></li>
+                        <?php endforeach; ?>
                     </ul>
                 </div>
             </div>
-            
-            <!-- Нижняя строка -->
-            <div class="footer-bottom">
-                <p>© 2026 Интернет-магазин автозапчастей — avtoZ</p>
-            </div>
+            <div class="footer-bottom"><p>© 2026 Ремонт-Хаб | Система управления заказами на ремонт квартир</p></div>
         </div>
     </footer>
+    
+    <!-- Настройки -->
+    <div id="settingsModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header"><h3>⚙️ Настройки</h3><span class="close" onclick="closeModal('settingsModal')">&times;</span></div>
+            <div class="modal-body">
+                <form method="POST">
+                    <div class="setting-group"><label>Тема</label>
+                        <div class="theme-options">
+                            <label class="theme-option <?php echo $theme=='light'?'active':''; ?>"><input type="radio" name="theme" value="light" <?php echo $theme=='light'?'checked':''; ?>>☀️ Светлая</label>
+                            <label class="theme-option <?php echo $theme=='dark'?'active':''; ?>"><input type="radio" name="theme" value="dark" <?php echo $theme=='dark'?'checked':''; ?>>🌙 Тёмная</label>
+                        </div>
+                    </div>
+                    <button type="submit" name="save_settings" class="btn-primary">💾 Сохранить</button>
+                </form>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        function openModal(id){document.getElementById(id).style.display='block';}
+        function closeModal(id){document.getElementById(id).style.display='none';}
+        window.onclick=function(e){if(e.target.className==='modal')e.target.style.display='none';}
+    </script>
 </body>
 </html>
